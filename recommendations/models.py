@@ -93,3 +93,24 @@ class SavedPlace(models.Model):
 
     def __str__(self):
         return f"{self.user} saved {self.shop.name} (rec={self.rec})"
+
+
+class PlaceEmbedding(models.Model):
+    place = models.OneToOneField(
+        Place,
+        on_delete=models.CASCADE,
+        related_name="embedding"
+    )
+    # 임베딩 벡터를 float 리스트로 저장
+    vector = models.JSONField(default=list)
+    # 벡터 생성에 사용한 텍스트 스냅샷
+    source_text = models.TextField(blank=True, default="")
+    model_name = models.CharField(max_length=100, default="text-embedding-3-small")
+    created_date = models.DateTimeField(auto_now_add=True)
+    modified_date = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "place_embedding"
+
+    def __str__(self):
+        return f"Embedding({self.model_name}) for {self.place.name}"
