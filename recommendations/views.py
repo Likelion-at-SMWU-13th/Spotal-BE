@@ -18,6 +18,9 @@ from .services.rag_service import (
     get_personalized_recommendations
 )
 from .services.enhanced_recommendation_service import EnhancedRecommendationService
+from .services.fast_hybrid_service import FastHybridService
+from .services.ultra_fast_service import UltraFastService
+from .services.smart_hybrid_service import SmartHybridService
 
 
 # Create your views here.
@@ -48,11 +51,11 @@ class RecommendationView(APIView):
             allowed_types = ["restaurant", "food"]
 
         try:
-            # Enhanced Recommendation Service 사용
-            enhanced_service = EnhancedRecommendationService()
+            # 스마트 하이브리드 서비스 사용 (상황에 따라 RAG vs 구글맵 선택)
+            smart_service = SmartHybridService()
             
-            # RAG가 통합된 추천 생성
-            recommendations = enhanced_service.generate_enhanced_recommendations(
+            # 스마트 추천 생성
+            recommendations = smart_service.generate_smart_recommendations(
                 name=name,
                 address=address,
                 emotion_tags=emotion_tags,
@@ -64,38 +67,36 @@ class RecommendationView(APIView):
             # 기존 API 형식으로 변환
             response_data = []
             for rec in recommendations:
-                place_data = rec['place']
-                
                 # Place 객체 가져오기
                 try:
-                    place = Place.objects.get(shop_id=place_data['shop_id'])
+                    place = Place.objects.get(shop_id=rec['shop_id'])
                     response_data.append(PlaceSerializer(place).data)
                 except Place.DoesNotExist:
                     # Place 객체가 없으면 새로 생성
                     location_obj = None
-                    if place_data.get('location'):
-                        location_obj, _ = Location.objects.get_or_create(name=place_data['location'])
+                    if rec.get('location'):
+                        location_obj, _ = Location.objects.get_or_create(name=rec['location'])
                     
                     place = Place.objects.create(
-                        name=place_data['name'],
-                        address=place_data['address'],
-                        photo_reference=place_data.get('google_place_id', ''),
+                        name=rec['name'],
+                        address=rec['address'],
+                        photo_reference=rec.get('google_place_id', ''),
                         location=location_obj,
-                        google_place_id=place_data.get('google_place_id'),
-                        google_rating=place_data.get('google_rating', 0.0),
-                        place_types=place_data.get('place_types', []),
-                        status=place_data.get('status', 'operating')
+                        google_place_id=rec.get('google_place_id'),
+                        google_rating=rec.get('google_rating', 0.0),
+                        place_types=rec.get('place_types', []),
+                        status=rec.get('status', 'operating')
                     )
                     
                     # 감정태그 설정
                     emotion_objs = []
-                    for emotion_name in place_data.get('emotions', []):
+                    for emotion_name in rec.get('emotions', []):
                         obj, _ = Emotion.objects.get_or_create(name=emotion_name)
                         emotion_objs.append(obj)
                     place.emotions.set(emotion_objs)
                     
                     # AI 요약 생성
-                    AISummary.objects.create(shop=place, summary=place_data.get('summary', ''))
+                    AISummary.objects.create(shop=place, summary=rec.get('summary', ''))
                     
                     response_data.append(PlaceSerializer(place).data)
             
@@ -108,7 +109,6 @@ class RecommendationView(APIView):
             )
 
 
-# --------------- Place (추천가게) ----------------
 
 
 
@@ -119,7 +119,6 @@ class PlaceDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.AllowAny]
 
 
-# --------------- SavedPlace (감정보관함) ----------------
 
 class SavedPlaceCreateView(generics.CreateAPIView):
     queryset = SavedPlace.objects.all()
@@ -176,7 +175,6 @@ class SavedPlaceDeleteView(generics.DestroyAPIView):
         )
 
 
-# --------------- AISummary (요약) ----------------
 
 # AISummary만 따로 조회
 class AISummaryDetailView(generics.RetrieveAPIView):

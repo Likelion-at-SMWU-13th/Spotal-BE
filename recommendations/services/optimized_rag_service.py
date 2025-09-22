@@ -72,6 +72,7 @@ class OptimizedRAGService(RAGRecommendationService):
             return cached_embedding
         
         # 임베딩 생성 및 캐시
+        from recommendations.services.embedding_service import embed_text
         embedding = embed_text(text, self.model_name)
         cache.set(cache_key, embedding, self.cache_timeout * 2)  # 더 긴 캐시
         
