@@ -18,4 +18,10 @@ urlpatterns = [
     # AISummary 
     path("<int:shop_id>/summary/", views.AISummaryDetailView.as_view(), name="aisummary-detail"), # ai 요약만 따로 확인 
     path("<int:shop_id>/summary/create/", views.AISummaryCreateUpdateView.as_view(), name="aisummary-create"), # ai 요약만 새로 생성
+    
+    # RAG 기반 추천 API
+    path("rag/search/", views.RAGSearchView.as_view(), name="rag-search"), # 자연어 검색
+    path("rag/similar/<int:shop_id>/", views.SimilarPlacesView.as_view(), name="similar-places"), # 유사 장소 추천
+    path("rag/personalized/", views.PersonalizedFeedView.as_view(), name="personalized-feed"), # 개인화 추천
+    path("rag/emotion-based/", views.EmotionBasedRAGView.as_view(), name="emotion-based-rag"), # 감정 기반 추천
 ]

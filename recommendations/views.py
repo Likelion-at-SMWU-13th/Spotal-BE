@@ -11,6 +11,13 @@ from search.service.address import translate_to_korean
 from .services.google_service import get_similar_places, get_place_details, get_photo_url
 from .services.utils import extract_neighborhood
 from .services.emotion_service import expand_emotions_with_gpt   
+from .services.rag_service import (
+    RAGRecommendationService, 
+    get_rag_recommendations,
+    get_similar_places,
+    get_personalized_recommendations
+)
+from .services.enhanced_recommendation_service import EnhancedRecommendationService
 
 
 # Create your views here.
@@ -41,86 +48,57 @@ class RecommendationView(APIView):
             allowed_types = ["restaurant", "food"]
 
         try:
-            # 1. GPT 기반 감정 확장
-            emotions = expand_emotions_with_gpt(emotion_tags)   # -> Emotion 객체 QuerySet
-            emotion_names = [e.name for e in emotions]          # → 문자열 리스트로 변환
-
-            # 2. 구글맵에서 유사 가게 검색
-            candidate_places = get_similar_places(
-                address,
-                emotion_names,
-                allowed_types=allowed_types
-            )[:8]
-
-            # user_id가 있으면 감정보관함 제외 필터링
-            saved_shop_ids = []
-            if user_id:
-                saved_shop_ids = SavedPlace.objects.filter(
-                    user_id=user_id, rec=1
-                ).values_list("shop_id", flat=True)
-
+            # Enhanced Recommendation Service 사용
+            enhanced_service = EnhancedRecommendationService()
+            
+            # RAG가 통합된 추천 생성
+            recommendations = enhanced_service.generate_enhanced_recommendations(
+                name=name,
+                address=address,
+                emotion_tags=emotion_tags,
+                user_id=user_id,
+                category=category_str,
+                top_k=8
+            )
+            
+            # 기존 API 형식으로 변환
             response_data = []
-
-            # 3. 후보 가게 상세 처리
-            for c in candidate_places:
-                place_id = c.get("place_id")
-                place_name = c.get("name")
-
-                details = get_place_details(place_id, place_name)
-                reviews = [r["text"] for r in details.get("reviews", [])]
-                uptaenms = details.get("types", [])
-
-                # 주소/이름 한국어 정규화
-                name_ko = translate_to_korean(details.get("name")) if details.get("name") else None
-                address_ko = translate_to_korean(details.get("formatted_address")) if details.get("formatted_address") else None
-
-                photo_ref = ""
-                if details.get("photos"):
-                    photo_ref = details["photos"][0].get("photo_reference", "")
-
-                # GPT 요약 + 감정태그 생성
-                if reviews:  
-                    summary = generate_summary_card(details, reviews, uptaenms) or "요약 준비중입니다"
-                else:
-                    neighborhood = extract_neighborhood(address_ko or c.get("address"))
-                    summary = f"{place_name}은 {neighborhood}에 위치한 가게입니다"
-
-                tags = generate_emotion_tags(details, reviews, uptaenms) or []
-
-                # Emotion 모델 매핑 (입력 감정 + 자동 생성 감정)
-                emotion_objs = list(emotions)  # GPT 확장된 감정
-                for tag_name in tags:
-                    obj, _ = Emotion.objects.get_or_create(name=tag_name)
-                    emotion_objs.append(obj)
-
-                # Location 매핑
-                neighborhood_name = extract_neighborhood(address_ko)
-                location_obj, _ = Location.objects.get_or_create(name=neighborhood_name)
-
-
-                place, created = Place.objects.update_or_create(
-                    google_place_id=place_id,
-                    defaults={
-                        "name": name_ko or place_name,
-                        "address": address_ko or c.get("address"),
-                        "photo_reference": photo_ref,   # details에서 가져온 값 저장
-                        "location": location_obj,
-                    }
-                )
-
-                place.emotions.set(emotion_objs)
-
-                # 새로 만든 경우에만 AISummary 생성
-                if created:
-                    AISummary.objects.create(shop=place, summary=summary)
-
-                # 감정보관함에 이미 저장된 경우 skip
-                if user_id and place.shop_id in saved_shop_ids:
-                    continue
-
-                # 직렬화 데이터 추가
-                response_data.append(PlaceSerializer(place).data)
-
+            for rec in recommendations:
+                place_data = rec['place']
+                
+                # Place 객체 가져오기
+                try:
+                    place = Place.objects.get(shop_id=place_data['shop_id'])
+                    response_data.append(PlaceSerializer(place).data)
+                except Place.DoesNotExist:
+                    # Place 객체가 없으면 새로 생성
+                    location_obj = None
+                    if place_data.get('location'):
+                        location_obj, _ = Location.objects.get_or_create(name=place_data['location'])
+                    
+                    place = Place.objects.create(
+                        name=place_data['name'],
+                        address=place_data['address'],
+                        photo_reference=place_data.get('google_place_id', ''),
+                        location=location_obj,
+                        google_place_id=place_data.get('google_place_id'),
+                        google_rating=place_data.get('google_rating', 0.0),
+                        place_types=place_data.get('place_types', []),
+                        status=place_data.get('status', 'operating')
+                    )
+                    
+                    # 감정태그 설정
+                    emotion_objs = []
+                    for emotion_name in place_data.get('emotions', []):
+                        obj, _ = Emotion.objects.get_or_create(name=emotion_name)
+                        emotion_objs.append(obj)
+                    place.emotions.set(emotion_objs)
+                    
+                    # AI 요약 생성
+                    AISummary.objects.create(shop=place, summary=place_data.get('summary', ''))
+                    
+                    response_data.append(PlaceSerializer(place).data)
+            
             return Response(response_data, status=status.HTTP_201_CREATED)
 
         except Exception as e:
@@ -239,3 +217,185 @@ class AISummaryCreateUpdateView(generics.CreateAPIView):
             },
             status=201 if created else 200
         )
+
+
+
+class RAGSearchView(APIView):
+    """RAG 기반 자연어 검색 API"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        query = request.data.get("query", "")
+        user_id = request.data.get("user_id", None)
+        emotion_filters = request.data.get("emotion_filters", [])
+        location_filters = request.data.get("location_filters", [])
+        top_k = request.data.get("top_k", 10)
+        
+        if not query:
+            return Response(
+                {"error": "검색 쿼리는 필수입니다."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            user = None
+            if user_id:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                try:
+                    user = User.objects.get(id=user_id)
+                except User.DoesNotExist:
+                    pass
+            
+            places = get_rag_recommendations(
+                query=query,
+                user=user,
+                emotion_filters=emotion_filters,
+                location_filters=location_filters,
+                top_k=top_k
+            )
+            
+            serializer = PlaceSerializer(places, many=True)
+            return Response({
+                "query": query,
+                "results": serializer.data,
+                "count": len(places)
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response(
+                {"error": f"검색 중 오류 발생: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SimilarPlacesView(APIView):
+    """특정 장소와 유사한 장소 추천 API"""
+    permission_classes = [AllowAny]
+    
+    def get(self, request, shop_id):
+        user_id = request.query_params.get("user_id", None)
+        top_k = int(request.query_params.get("top_k", 5))
+        
+        try:
+            place = Place.objects.get(shop_id=shop_id)
+            
+            user = None
+            if user_id:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                try:
+                    user = User.objects.get(id=user_id)
+                except User.DoesNotExist:
+                    pass
+            
+            similar_places = get_similar_places(place, user, top_k)
+            serializer = PlaceSerializer(similar_places, many=True)
+            
+            return Response({
+                "place": PlaceSerializer(place).data,
+                "similar_places": serializer.data,
+                "count": len(similar_places)
+            }, status=status.HTTP_200_OK)
+            
+        except Place.DoesNotExist:
+            return Response(
+                {"error": "해당 장소를 찾을 수 없습니다."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"유사 장소 검색 중 오류 발생: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PersonalizedFeedView(APIView):
+    """개인화된 추천 피드 API"""
+    permission_classes = [AllowAny]
+    
+    def get(self, request):
+        user_id = request.query_params.get("user_id")
+        top_k = int(request.query_params.get("top_k", 20))
+        
+        if not user_id:
+            return Response(
+                {"error": "user_id는 필수입니다."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            user = User.objects.get(id=user_id)
+            
+            recommendations = get_personalized_recommendations(user, top_k)
+            serializer = PlaceSerializer(recommendations, many=True)
+            
+            return Response({
+                "user_id": user_id,
+                "recommendations": serializer.data,
+                "count": len(recommendations)
+            }, status=status.HTTP_200_OK)
+            
+        except User.DoesNotExist:
+            return Response(
+                {"error": "사용자를 찾을 수 없습니다."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"개인화 추천 중 오류 발생: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class EmotionBasedRAGView(APIView):
+    """감정 기반 RAG 추천 API"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        emotions = request.data.get("emotions", [])
+        location = request.data.get("location", None)
+        user_id = request.data.get("user_id", None)
+        top_k = request.data.get("top_k", 10)
+        
+        if not emotions:
+            return Response(
+                {"error": "감정 태그는 필수입니다."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            user = None
+            if user_id:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                try:
+                    user = User.objects.get(id=user_id)
+                except User.DoesNotExist:
+                    pass
+            
+            service = RAGRecommendationService()
+            results = service.get_emotion_based_recommendations(
+                emotions=emotions,
+                user=user,
+                location=location,
+                top_k=top_k
+            )
+            
+            places = [place for place, _ in results]
+            serializer = PlaceSerializer(places, many=True)
+            
+            return Response({
+                "emotions": emotions,
+                "location": location,
+                "recommendations": serializer.data,
+                "count": len(places)
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response(
+                {"error": f"감정 기반 추천 중 오류 발생: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
