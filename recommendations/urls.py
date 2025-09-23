@@ -6,6 +6,7 @@ app_name = 'recommendations'
 urlpatterns = [
     # 추천 가게 (POST: 추천 생성 & 응답)
     path("", views.RecommendationView.as_view(), name="recommendation"),
+    path("recommend-stores/", views.RecommendationView.as_view(), name="recommend-stores"),
 
     # 가게 상세 조회
     path("<int:shop_id>/", views.PlaceDetailView.as_view(), name="place-detail"),

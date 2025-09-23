@@ -22,6 +22,7 @@ urlpatterns = [
     path('community/', include('community.urls')),
     path('api/infer/', include('infer.urls')),
     path('api/places/', include('recommendations.urls')),
+    path('api/recommendations/', include('recommendations.urls')),
     path('search/', include('search.urls')),
     path('api/users/', include('users.urls')),
     path('mypage/', include('mypage.urls')),
